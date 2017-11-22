@@ -14,7 +14,13 @@ maintainer:
 category:            Language
 build-type:          Custom
 extra-source-files:  Makefile, README.md, Exp.cf, examples/*.ctt, cubicaltt.el
-cabal-version:       >=1.10
+cabal-version:       >=1.24
+
+custom-setup
+  setup-depends:     base,
+                     process,
+                     Cabal,
+                     BNFC
 
 executable cubical
   main-is:             Main.hs
