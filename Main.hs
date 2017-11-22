@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 module Main where
 
 import Control.Monad.Reader
@@ -120,31 +121,34 @@ initLoop flags f hist = do
 -- The main loop
 loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> Interpreter ()
 loop flags f names tenv = go where 
- go = do
-  input <- getInputLine prompt
-  case input of
-    Nothing    -> outputStrLn help >> go
-    Just ":q"  -> return ()
-    Just ":r"  -> getHistory >>= lift . initLoop flags f
-    Just (':':'l':' ':str)
-      | ' ' `elem` str -> outputStrLn "Only one file allowed after :l" >> go
+  go = do
+
+    input <- getInputLine prompt
+    case input of
+      Nothing    -> outputStrLn help >> go
+      Just ":q"  -> return ()
+      Just ":r"  -> getHistory >>= lift . initLoop flags f
+      Just x -> go2 x >> go
+  go2 = \case
+    (':':'l':' ':str)
+      | ' ' `elem` str -> outputStrLn "Only one file allowed after :l"
       | otherwise      -> getHistory >>= lift . initLoop flags str
-    Just (':':'c':'d':' ':str) -> lift (setCurrentDirectory str) >> go
-    Just ":h"  -> outputStrLn help >> go
-    Just str'  ->
+    (':':'c':'d':' ':str) -> lift (setCurrentDirectory str)
+    ":h"  -> outputStrLn help
+    str'  ->
       let (msg,str,mod) = case str' of
             (':':'n':' ':str) ->
               ("NORMEVAL: ",str,E.normal [])
             str -> ("EVAL: ",str,id)
       in case pExp (lexer str) of
-      Bad err -> outputStrLn ("Parse error: " ++ err) >> go
+      Bad err -> outputStrLn ("Parse error: " ++ err)
       Ok  exp ->
         case runResolver $ local (insertIdents names) $ resolveExp exp of
-          Left  err  -> outputStrLn ("Resolver failed: " ++ err) >> go
+          Left  err  -> outputStrLn ("Resolver failed: " ++ err)
           Right body -> do
             x <- liftIO $ TC.runInfer tenv body
             case x of
-              Left err -> outputStrLn ("Could not type-check: " ++ err) >> go
+              Left err -> outputStrLn ("Could not type-check: " ++ err)
               Right _  -> do
                 start <- liftIO getCurrentTime
                 let e = mod $ E.eval (TC.env tenv) body
@@ -164,7 +168,6 @@ loop flags f names tenv = go where
                    outputStrLn $ "Time: " ++ show mins ++ "m" ++ sec ++ "s"
                 -- Only print in seconds:
                 -- when (Time `elem` flags) $ outputStrLn $ "Time: " ++ show time
-                go
 
 -- (not ok,loaded,already loaded defs) -> to load ->
 --   (new not ok, new loaded, new defs)
