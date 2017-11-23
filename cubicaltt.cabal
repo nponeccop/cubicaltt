@@ -28,6 +28,7 @@ executable cubical
     Connections,
     CTT,
     Eval,
+    Paths_cubicaltt,
     Resolver,
     TypeChecker,
     Exp.Abs,

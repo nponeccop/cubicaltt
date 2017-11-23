@@ -7,6 +7,7 @@ import Data.Bifunctor
 import Data.IORef
 import Data.List
 import Data.Time
+import Data.Version (showVersion)
 import System.Directory
 import System.FilePath
 import System.Environment
@@ -21,7 +22,9 @@ import Exp.Abs
 import Exp.Layout
 import Exp.ErrM
 
+
 import CTT
+import qualified Paths_cubicaltt as CabalFile
 import Resolver
 import qualified TypeChecker as TC
 import qualified Eval as E
@@ -40,8 +43,8 @@ options = [ Option "d"  ["debug"]   (NoArg Debug)   "run in debugging mode"
           , Option ""   ["version"] (NoArg Version) "print version number" ]
 
 -- Version number, welcome message, usage and prompt strings
-version, welcome, usage, prompt :: String
-version = "1.0"
+welcome, usage, prompt :: String
+version = showVersion CabalFile.version
 welcome = "cubical, version: " ++ version ++ "  (:h for help)\n"
 usage   = "Usage: cubical [options] <file.ctt>\nOptions:"
 prompt  = "> "
