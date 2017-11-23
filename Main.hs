@@ -104,7 +104,7 @@ wrapTypeChecker adefs names = do
 
 compileFile :: String -> IO (Either OurError (Bool, [(Ident, SymKind)], TC.TEnv))
 compileFile f = runExceptT $ do
-  (_,_,mods) <- liftIO $ imports True ([],[],[]) f
+  (_,_,mods) <- imports True ([],[],[]) f
   -- Translate to TT
   (adefs, names) <- wrapResolver mods
   -- After resolivng the file check if some definitions were shadowed:
@@ -115,6 +115,7 @@ compileFile f = runExceptT $ do
 data OurError
   = OEResolver String
   | OETypeChecker String [(CTT.Ident,SymKind)] TC.TEnv
+  | OEImports String
 
 handleErrors = \case
   Right (noMods, names, tenv) -> do
@@ -127,6 +128,9 @@ handleErrors = \case
     OETypeChecker err names tenv -> do
       putStrLn $ "Type checking failed: " ++ shrink err
       return (names, tenv)
+    OEImports err -> do
+      putStrLn err
+      return ([], TC.verboseEnv)
 
 resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags) $ do
   -- Compute names for auto completion
@@ -202,25 +206,25 @@ loop flags f names tenv completionRef = go where
 --   (new not ok, new loaded, new defs)
 -- the bool determines if it should be verbose or not
 imports :: Bool -> ([String],[String],[Module]) -> String ->
-           IO ([String],[String],[Module])
+           ExceptT OurError IO ([String],[String],[Module])
 imports v st@(notok,loaded,mods) f
-  | f `elem` notok  = error ("Looping imports in " ++ f)
+  | f `elem` notok  = throwError $ OEImports ("Looping imports in " ++ f)
   | f `elem` loaded = return st
   | otherwise       = do
-    b <- doesFileExist f
-    when (not b) $ error (f ++ " does not exist")
+    b <- liftIO $ doesFileExist f
+    when (not b) $ throwError $ OEImports (f ++ " does not exist")
     let prefix = dropFileName f
-    s <- readFile f
+    s <- liftIO $ readFile f
     let ts = lexer s
     case pModule ts of
-      Bad s -> error ("Parse failed in " ++ show f ++ "\n" ++ show s)
+      Bad s -> throwError $ OEImports ("Parse failed in " ++ show f ++ "\n" ++ show s)
       Ok mod@(Module (AIdent (_,name)) imp decls) -> do
         let imp_ctt = [prefix ++ i ++ ".ctt" | Import (AIdent (_,i)) <- imp]
         when (name /= dropExtension (takeFileName f)) $
-          error ("Module name mismatch in " ++ show f ++ " with wrong name " ++ name)
+          throwError $ OEImports $ "Module name mismatch in " ++ show f ++ " with wrong name " ++ name
         (notok1,loaded1,mods1) <-
           foldM (imports v) (f:notok,loaded,mods) imp_ctt
-        when v $ putStrLn $ "Parsed " ++ show f ++ " successfully!"
+        liftIO $ when v $ putStrLn $ "Parsed " ++ show f ++ " successfully!"
         return (notok,f:loaded1,mods1 ++ [mod])
 
 help :: String
