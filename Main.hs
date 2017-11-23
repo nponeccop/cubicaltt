@@ -95,13 +95,14 @@ shrink s = s -- if length s > 1000 then take 1000 s ++ "..." else s
 
 wrapResolver mods = ExceptT $ return $ first OEResolver $ runResolver $ resolveModules mods
 
-wrapTypeChecker :: MonadIO m => [Decls] -> [(Ident, SymKind)] -> ExceptT OurError m TC.TEnv
+wrapTypeChecker :: [Decls] -> [(Ident, SymKind)] -> ExceptT OurError IO TC.TEnv
 wrapTypeChecker adefs names = do
   (merr,tenv) <- liftIO $ TC.runDeclss TC.verboseEnv adefs
   ExceptT $ return $ case merr of
     Just err -> Left $ OETypeChecker err names tenv
     Nothing -> Right tenv
 
+compileFile :: String -> IO (Either OurError (Bool, [(Ident, SymKind)], TC.TEnv))
 compileFile f = runExceptT $ do
   (_,_,mods) <- liftIO $ imports True ([],[],[]) f
   -- Translate to TT
@@ -117,14 +118,14 @@ data OurError
 
 handleErrors = \case
   Right (noMods, names, tenv) -> do
-    unless noMods $ liftIO $ putStrLn "File loaded."
+    unless noMods $ putStrLn "File loaded."
     return (names, tenv)
   Left x -> case x of
     OEResolver err -> do
-      outputStrLn $ "Resolver failed: " ++ err
+      putStrLn $ "Resolver failed: " ++ err
       return ([], TC.verboseEnv)
     OETypeChecker err names tenv -> do
-      outputStrLn $ "Type checking failed: " ++ shrink err
+      putStrLn $ "Type checking failed: " ++ shrink err
       return (names, tenv)
 
 resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags) $ do
@@ -143,7 +144,7 @@ warnDups names = do
 -- Initialize the main loop
 initLoop :: [Flag] -> FilePath -> IORef [String] -> Interpreter ()
 initLoop flags f completionRef
-  = compileFile f >>= handleErrors >>= resumeLoop flags f completionRef
+  = liftIO (compileFile f >>= handleErrors) >>= resumeLoop flags f completionRef
 
 -- The main loop
 loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> IORef [String] -> Interpreter ()
