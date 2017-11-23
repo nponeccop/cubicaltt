@@ -156,12 +156,12 @@ loop flags f names tenv completionRef = go where
       Nothing    -> outputStrLn help >> go
       Just ":q"  -> return ()
       Just ":r"  -> initLoop flags f completionRef
+      Just (':':'l':' ':str)
+        | ' ' `elem` str -> outputStrLn "Only one file allowed after :l" >> go
+        | otherwise      -> initLoop flags str completionRef
       Just x -> go2 x >> go
   go2 :: String -> Interpreter ()
   go2 = \case
-    (':':'l':' ':str)
-      | ' ' `elem` str -> outputStrLn "Only one file allowed after :l"
-      | otherwise      -> initLoop flags str completionRef
     (':':'c':'d':' ':str) -> liftIO (setCurrentDirectory str)
     ":h"  -> outputStrLn help
     str'  ->
