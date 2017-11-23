@@ -1,8 +1,9 @@
 {-# LANGUAGE LambdaCase #-}
-module Main where
+module Main (main) where
 
+import Control.Monad.Except
 import Control.Monad.Reader
-import qualified Control.Exception as E
+import Data.Bifunctor
 import Data.IORef
 import Data.List
 import Data.Time
@@ -11,13 +12,12 @@ import System.FilePath
 import System.Environment
 import System.Console.GetOpt
 import System.Console.Haskeline
-import System.Console.Haskeline.History
 import Text.Printf
 
 import Exp.Lex
 import Exp.Par
 import Exp.Print
-import Exp.Abs hiding (NoArg)
+import Exp.Abs
 import Exp.Layout
 import Exp.ErrM
 
@@ -93,38 +93,57 @@ main = do
 shrink :: String -> String
 shrink s = s -- if length s > 1000 then take 1000 s ++ "..." else s
 
+wrapResolver mods = ExceptT $ return $ first OEResolver $ runResolver $ resolveModules mods
+
+wrapTypeChecker :: MonadIO m => [Decls] -> [(Ident, SymKind)] -> ExceptT OurError m TC.TEnv
+wrapTypeChecker adefs names = do
+  (merr,tenv) <- liftIO $ TC.runDeclss TC.verboseEnv adefs
+  ExceptT $ return $ case merr of
+    Just err -> Left $ OETypeChecker err names tenv
+    Nothing -> Right tenv
+
+compileFile f = runExceptT $ do
+  (_,_,mods) <- liftIO $ imports True ([],[],[]) f
+  -- Translate to TT
+  (adefs, names) <- wrapResolver mods
+  -- After resolivng the file check if some definitions were shadowed:
+  warnDups names
+  tenv <- wrapTypeChecker adefs names
+  return (null mods, names, tenv)
+
+data OurError
+  = OEResolver String
+  | OETypeChecker String [(CTT.Ident,SymKind)] TC.TEnv
+
+handleErrors = \case
+  Right (noMods, names, tenv) -> do
+    unless noMods $ liftIO $ putStrLn "File loaded."
+    return (names, tenv)
+  Left x -> case x of
+    OEResolver err -> do
+      outputStrLn $ "Resolver failed: " ++ err
+      return ([], TC.verboseEnv)
+    OETypeChecker err names tenv -> do
+      outputStrLn $ "Type checking failed: " ++ shrink err
+      return (names, tenv)
+
+resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags) $ do
+  -- Compute names for auto completion
+  liftIO $ writeIORef completionRef $ map fst names
+  loop flags f names tenv completionRef
+
+warnDups names = do
+  let ns = map fst names
+      uns = nub ns
+      dups = ns \\ uns
+  liftIO $ unless (null dups) $
+    putStrLn $ "Warning: the following definitions were shadowed [" ++
+               intercalate ", " dups ++ "]"
+
 -- Initialize the main loop
 initLoop :: [Flag] -> FilePath -> IORef [String] -> Interpreter ()
-initLoop flags f completionRef = do
-  -- Parse and type check files
-  (_,_,mods) <- liftIO $ E.catch (imports True ([],[],[]) f)
-                        (\e -> do putStrLn ("Exception: " ++ takeWhile (/='\n')
-                                           (show (e :: SomeException)))
-                                  return ([],[],[]))
-  -- Translate to TT
-  let res = runResolver $ resolveModules mods
-  case res of
-    Left err    -> do
-      outputStrLn $ "Resolver failed: " ++ err
-      loop flags f [] TC.verboseEnv completionRef
-    Right (adefs,names) -> do
-      -- After resolivng the file check if some definitions were shadowed:
-      let ns = map fst names
-          uns = nub ns
-          dups = ns \\ uns
-      unless (dups == []) $
-        outputStrLn $ "Warning: the following definitions were shadowed [" ++
-                   intercalate ", " dups ++ "]"
-      (merr,tenv) <- liftIO $ TC.runDeclss TC.verboseEnv adefs
-      case merr of
-        Just err -> outputStrLn $ "Type checking failed: " ++ shrink err
-        Nothing  -> unless (mods == []) $ liftIO $ putStrLn "File loaded."
-      if Batch `elem` flags
-        then return ()
-        else -- Compute names for auto completion
-           do
-             liftIO $ writeIORef completionRef [n | (n,_) <- names]
-             loop flags f names tenv completionRef
+initLoop flags f completionRef
+  = compileFile f >>= handleErrors >>= resumeLoop flags f completionRef
 
 -- The main loop
 loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> IORef [String] -> Interpreter ()
