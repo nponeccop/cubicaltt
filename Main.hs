@@ -3,6 +3,7 @@ module Main where
 
 import Control.Monad.Reader
 import qualified Control.Exception as E
+import Data.IORef
 import Data.List
 import Data.Time
 import System.Directory
@@ -57,14 +58,20 @@ showTree tree = do
 searchFunc :: [String] -> String -> [Completion]
 searchFunc ns str = map simpleCompletion $ filter (str `isPrefixOf`) ns
 
-settings :: [String] -> Settings IO
-settings ns = Settings
-  { historyFile    = Nothing
-  , complete       = completeWord Nothing " \t" $ return . searchFunc ns
+settings :: IORef [String] -> Settings IO
+settings n = Settings
+  { historyFile    = Just "cubicaltt.history.txt"
+  , complete       = completeWord Nothing " \t" $ ourCompletion n
   , autoAddHistory = True }
+
+ourCompletion :: IORef [String] -> String -> IO [Completion]
+ourCompletion n x = do
+  ns <- readIORef n
+  return $ searchFunc ns x
 
 main :: IO ()
 main = do
+  completionRef <- newIORef []
   args <- getArgs
   case getOpt Permute options args of
     (flags,files,[])
@@ -73,11 +80,11 @@ main = do
       | otherwise -> case files of
        []  -> do
          putStrLn welcome
-         runInputT (settings []) (loop flags [] [] TC.verboseEnv)
+         runInputT (settings completionRef) (loop flags [] [] TC.verboseEnv completionRef)
        [f] -> do
          putStrLn welcome
          putStrLn $ "Loading " ++ show f
-         initLoop flags f emptyHistory
+         runInputT (settings completionRef) $ initLoop flags f completionRef
        _   -> putStrLn $ "Input error: zero or one file expected\n\n" ++
                          usageInfo usage options
     (_,_,errs) -> putStrLn $ "Input error: " ++ concat errs ++ "\n" ++
@@ -87,10 +94,10 @@ shrink :: String -> String
 shrink s = s -- if length s > 1000 then take 1000 s ++ "..." else s
 
 -- Initialize the main loop
-initLoop :: [Flag] -> FilePath -> History -> IO ()
-initLoop flags f hist = do
+initLoop :: [Flag] -> FilePath -> IORef [String] -> Interpreter ()
+initLoop flags f completionRef = do
   -- Parse and type check files
-  (_,_,mods) <- E.catch (imports True ([],[],[]) f)
+  (_,_,mods) <- liftIO $ E.catch (imports True ([],[],[]) f)
                         (\e -> do putStrLn ("Exception: " ++ takeWhile (/='\n')
                                            (show (e :: SomeException)))
                                   return ([],[],[]))
@@ -98,42 +105,44 @@ initLoop flags f hist = do
   let res = runResolver $ resolveModules mods
   case res of
     Left err    -> do
-      putStrLn $ "Resolver failed: " ++ err
-      runInputT (settings []) (putHistory hist >> loop flags f [] TC.verboseEnv)
+      outputStrLn $ "Resolver failed: " ++ err
+      loop flags f [] TC.verboseEnv completionRef
     Right (adefs,names) -> do
       -- After resolivng the file check if some definitions were shadowed:
       let ns = map fst names
           uns = nub ns
           dups = ns \\ uns
       unless (dups == []) $
-        putStrLn $ "Warning: the following definitions were shadowed [" ++
+        outputStrLn $ "Warning: the following definitions were shadowed [" ++
                    intercalate ", " dups ++ "]"
-      (merr,tenv) <- TC.runDeclss TC.verboseEnv adefs
+      (merr,tenv) <- liftIO $ TC.runDeclss TC.verboseEnv adefs
       case merr of
-        Just err -> putStrLn $ "Type checking failed: " ++ shrink err
-        Nothing  -> unless (mods == []) $ putStrLn "File loaded."
+        Just err -> outputStrLn $ "Type checking failed: " ++ shrink err
+        Nothing  -> unless (mods == []) $ liftIO $ putStrLn "File loaded."
       if Batch `elem` flags
         then return ()
         else -- Compute names for auto completion
-             runInputT (settings [n | (n,_) <- names])
-               (putHistory hist >> loop flags f names tenv)
+           do
+             liftIO $ writeIORef completionRef [n | (n,_) <- names]
+             loop flags f names tenv completionRef
 
 -- The main loop
-loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> Interpreter ()
-loop flags f names tenv = go where 
+loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> IORef [String] -> Interpreter ()
+loop flags f names tenv completionRef = go where
+  go :: Interpreter ()
   go = do
-
     input <- getInputLine prompt
     case input of
       Nothing    -> outputStrLn help >> go
       Just ":q"  -> return ()
-      Just ":r"  -> getHistory >>= lift . initLoop flags f
+      Just ":r"  -> initLoop flags f completionRef
       Just x -> go2 x >> go
+  go2 :: String -> Interpreter ()
   go2 = \case
     (':':'l':' ':str)
       | ' ' `elem` str -> outputStrLn "Only one file allowed after :l"
-      | otherwise      -> getHistory >>= lift . initLoop flags str
-    (':':'c':'d':' ':str) -> lift (setCurrentDirectory str)
+      | otherwise      -> initLoop flags str completionRef
+    (':':'c':'d':' ':str) -> liftIO (setCurrentDirectory str)
     ":h"  -> outputStrLn help
     str'  ->
       let (msg,str,mod) = case str' of
