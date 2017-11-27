@@ -96,7 +96,13 @@ main = do
 shrink :: String -> String
 shrink s = s -- if length s > 1000 then take 1000 s ++ "..." else s
 
-wrapResolver mods = ExceptT $ return $ first OEResolver $ runResolver $ resolveModules mods
+wrapResolver x = ExceptT $ return $ first OEResolver $ runResolver x
+
+wrapExpressionParser exprStr = ExceptT $ return $ first OEParser $ case pExp (lexer exprStr) of
+  Bad err -> Left err
+  Ok result -> Right result
+
+wrapExpressionTypeChecker tenv body = ExceptT $ first OETypeCheckerExpr <$> TC.runInfer tenv body
 
 wrapTypeChecker :: [Decls] -> [(Ident, SymKind)] -> ExceptT OurError IO TC.TEnv
 wrapTypeChecker adefs names = do
@@ -109,22 +115,57 @@ compileFile :: String -> IO (Either OurError (Bool, [(Ident, SymKind)], TC.TEnv)
 compileFile f = runExceptT $ do
   (_,_,mods) <- imports True ([],[],[]) f
   -- Translate to TT
-  (adefs, names) <- wrapResolver mods
+  (adefs, names) <- wrapResolver $ resolveModules mods
   -- After resolivng the file check if some definitions were shadowed:
   warnDups names
   tenv <- wrapTypeChecker adefs names
   return (null mods, names, tenv)
 
+compileExpr names tenv flags str' = runExceptT $ let
+    (msg,str,mod) = case str' of
+      (':':'n':' ':str) -> ("NORMEVAL: ",str,E.normal [])
+      str -> ("EVAL: ",str,id)
+  in do
+  exp <- wrapExpressionParser str
+  body <- wrapResolver $ local (insertIdents names) $ resolveExp exp
+  _ <-  wrapExpressionTypeChecker tenv body
+  start <- liftIO getCurrentTime
+  let e = mod $ E.eval (TC.env tenv) body
+  -- Let's not crash if the evaluation raises an error:
+  liftIO $ catch (putStrLn (msg ++ shrink (show e)))
+                 -- (writeFile "examples/nunivalence3.ctt" (show e))
+                 (\e -> putStrLn ("Exception: " ++
+                                  show (e :: SomeException)))
+  stop <- liftIO getCurrentTime
+  -- Compute time and print nicely
+  let time = diffUTCTime stop start
+      secs = read (takeWhile (/='.') (init (show time)))
+      rest = read ('0':dropWhile (/='.') (init (show time)))
+      mins = secs `quot` 60
+      sec  = printf "%.3f" (fromInteger (secs `rem` 60) + rest :: Float)
+  liftIO $ when (Time `elem` flags) $
+     putStrLn $ "Time: " ++ show mins ++ "m" ++ sec ++ "s"
+  -- Only print in seconds:
+  -- when (Time `elem` flags) $ outputStrLn $ "Time: " ++ show time
+
 data OurError
   = OEResolver String
   | OETypeChecker String [(CTT.Ident,SymKind)] TC.TEnv
   | OEImports String
+  | OEParser String
+  | OETypeCheckerExpr String
 
-handleErrors = \case
+handleFileErrors = \case
   Right (noMods, names, tenv) -> do
     unless noMods $ putStrLn "File loaded."
     return (names, tenv)
-  Left x -> case x of
+  Left x -> handleCommonErrors x
+
+handleExprErrors = \case
+  Right _ -> return ()
+  Left x -> void $ handleCommonErrors x
+
+handleCommonErrors = \case
     OEResolver err -> do
       putStrLn $ "Resolver failed: " ++ err
       return ([], TC.verboseEnv)
@@ -133,6 +174,12 @@ handleErrors = \case
       return (names, tenv)
     OEImports err -> do
       putStrLn err
+      return ([], TC.verboseEnv)
+    OETypeCheckerExpr err -> do
+      putStrLn $ "Type checking failed: " ++ shrink err
+      return ([], TC.verboseEnv)
+    OEParser err -> do
+      putStrLn ("Parse error: " ++ err)
       return ([], TC.verboseEnv)
 
 resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags) $ do
@@ -151,7 +198,7 @@ warnDups names = do
 -- Initialize the main loop
 initLoop :: [Flag] -> FilePath -> IORef [String] -> Interpreter ()
 initLoop flags f completionRef
-  = liftIO (compileFile f >>= handleErrors) >>= resumeLoop flags f completionRef
+  = liftIO (compileFile f >>= handleFileErrors) >>= resumeLoop flags f completionRef
 
 -- The main loop
 loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> IORef [String] -> Interpreter ()
@@ -168,42 +215,10 @@ loop flags f names tenv completionRef = go where
         | otherwise      -> initLoop flags str completionRef
       Just x -> go2 x >> go
   go2 :: String -> Interpreter ()
-  go2 = \case
-    (':':'c':'d':' ':str) -> liftIO (setCurrentDirectory str)
-    ":h"  -> outputStrLn help
-    str'  ->
-      let (msg,str,mod) = case str' of
-            (':':'n':' ':str) ->
-              ("NORMEVAL: ",str,E.normal [])
-            str -> ("EVAL: ",str,id)
-      in case pExp (lexer str) of
-      Bad err -> outputStrLn ("Parse error: " ++ err)
-      Ok  exp ->
-        case runResolver $ local (insertIdents names) $ resolveExp exp of
-          Left  err  -> outputStrLn ("Resolver failed: " ++ err)
-          Right body -> do
-            x <- liftIO $ TC.runInfer tenv body
-            case x of
-              Left err -> outputStrLn ("Could not type-check: " ++ err)
-              Right _  -> do
-                start <- liftIO getCurrentTime
-                let e = mod $ E.eval (TC.env tenv) body
-                -- Let's not crash if the evaluation raises an error:
-                liftIO $ catch (putStrLn (msg ++ shrink (show e)))
-                               -- (writeFile "examples/nunivalence3.ctt" (show e))
-                               (\e -> putStrLn ("Exception: " ++
-                                                show (e :: SomeException)))
-                stop <- liftIO getCurrentTime
-                -- Compute time and print nicely
-                let time = diffUTCTime stop start
-                    secs = read (takeWhile (/='.') (init (show time)))
-                    rest = read ('0':dropWhile (/='.') (init (show time)))
-                    mins = secs `quot` 60
-                    sec  = printf "%.3f" (fromInteger (secs `rem` 60) + rest :: Float)
-                when (Time `elem` flags) $
-                   outputStrLn $ "Time: " ++ show mins ++ "m" ++ sec ++ "s"
-                -- Only print in seconds:
-                -- when (Time `elem` flags) $ outputStrLn $ "Time: " ++ show time
+  go2 = liftIO . \case
+    (':':'c':'d':' ':str) -> setCurrentDirectory str
+    ":h"  -> putStrLn help
+    str'  -> compileExpr names tenv flags str' >>= handleExprErrors
 
 -- (not ok,loaded,already loaded defs) -> to load ->
 --   (new not ok, new loaded, new defs)
