@@ -121,6 +121,23 @@ compileFile f = runExceptT $ do
   tenv <- wrapTypeChecker adefs names
   return (null mods, names, tenv)
 
+measureTime flag operation
+  | flag = do
+    start <- getCurrentTime
+    result <- operation
+    stop <- getCurrentTime
+    -- Compute time and print nicely
+    let time = diffUTCTime stop start
+        secs = read (takeWhile (/='.') (init (show time)))
+        rest = read ('0':dropWhile (/='.') (init (show time)))
+        mins = secs `quot` 60
+        sec  = printf "%.3f" (fromInteger (secs `rem` 60) + rest :: Float)
+    putStrLn $ "Time: " ++ show mins ++ "m" ++ sec ++ "s"
+    -- Only print in seconds:
+    -- when (Time `elem` flags) $ outputStrLn $ "Time: " ++ show time
+    return result
+  | otherwise = operation
+
 compileExpr names tenv flags str' = runExceptT $ let
     (msg,str,mod) = case str' of
       (':':'n':' ':str) -> ("NORMEVAL: ",str,E.normal [])
@@ -129,24 +146,13 @@ compileExpr names tenv flags str' = runExceptT $ let
   exp <- wrapExpressionParser str
   body <- wrapResolver $ local (insertIdents names) $ resolveExp exp
   _ <-  wrapExpressionTypeChecker tenv body
-  start <- liftIO getCurrentTime
-  let e = mod $ E.eval (TC.env tenv) body
-  -- Let's not crash if the evaluation raises an error:
-  liftIO $ catch (putStrLn (msg ++ shrink (show e)))
+  liftIO $ measureTime (Time `elem` flags) $ do
+    let e = mod $ E.eval (TC.env tenv) body
+    -- Let's not crash if the evaluation raises an error:
+    putStrLn (msg ++ shrink (show e)) `catch`
                  -- (writeFile "examples/nunivalence3.ctt" (show e))
                  (\e -> putStrLn ("Exception: " ++
                                   show (e :: SomeException)))
-  stop <- liftIO getCurrentTime
-  -- Compute time and print nicely
-  let time = diffUTCTime stop start
-      secs = read (takeWhile (/='.') (init (show time)))
-      rest = read ('0':dropWhile (/='.') (init (show time)))
-      mins = secs `quot` 60
-      sec  = printf "%.3f" (fromInteger (secs `rem` 60) + rest :: Float)
-  liftIO $ when (Time `elem` flags) $
-     putStrLn $ "Time: " ++ show mins ++ "m" ++ sec ++ "s"
-  -- Only print in seconds:
-  -- when (Time `elem` flags) $ outputStrLn $ "Time: " ++ show time
 
 data OurError
   = OEResolver String
