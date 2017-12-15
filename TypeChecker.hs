@@ -1,14 +1,11 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE LambdaCase #-}
 module TypeChecker where
 
-import Control.Applicative hiding (empty)
 import Control.Monad
 import Control.Monad.Except
 import Control.Monad.Reader
-import Data.Map (Map,(!),mapWithKey,assocs,filterWithKey,elems,keys
-                ,intersection,intersectionWith,intersectionWithKey
-                ,toList,fromList)
-import qualified Data.Map as Map
+import Data.Map (mapWithKey,elems,keys
+                ,intersectionWith,intersectionWithKey)
 import qualified Data.Traversable as T
 
 import Connections
@@ -138,11 +135,11 @@ check a t = case (a,t) of
     checks (bs,nu) es
   (VU,Pi f)       -> checkFam f
   (VU,Sigma f)    -> checkFam f
-  (VU,Sum _ _ bs) -> forM_ bs $ \lbl -> case lbl of
+  (VU,Sum _ _ bs) -> forM_ bs $ \case
     OLabel _ tele -> checkTele tele
     PLabel _ tele is ts ->
       throwError $ "check: no path constructor allowed in " ++ show t
-  (VU,HSum _ _ bs) -> forM_ bs $ \lbl -> case lbl of
+  (VU,HSum _ _ bs) -> forM_ bs $ \case
     OLabel _ tele -> checkTele tele
     PLabel _ tele is ts -> do
       checkTele tele
@@ -481,13 +478,13 @@ infer e = case e of
     (va0, va1) <- checkPLam (constPath VU) a
     va <- evalTyping a
     check va0 t0
-    checkPLamSystem t0 va ps
+    _ <- checkPLamSystem t0 va ps
     return va1
   Fill a t0 ps -> do
     (va0, va1) <- checkPLam (constPath VU) a
     va <- evalTyping a
     check va0 t0
-    checkPLamSystem t0 va ps
+    _ <- checkPLamSystem t0 va ps
     vt  <- evalTyping t0
     rho <- asks env
     let vps = evalSystem rho ps

@@ -3,14 +3,12 @@
 -- | Convert the concrete syntax into the syntax of cubical TT.
 module Resolver where
 
-import Control.Applicative
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.Except
 import Control.Monad.Identity
 import Data.Maybe
 import Data.List
-import Data.Map (Map,(!))
 import qualified Data.Map as Map
 
 import Exp.Abs
@@ -369,10 +367,10 @@ resolveDecl d = case d of
     l <- findDeclLoc d
     return (CTT.MutualDecls l ads,ns)
   DeclOpaque i  -> do
-    resolveVar i
+    _ <- resolveVar i
     return (CTT.OpaqueDecl (unAIdent i), [])
   DeclTransparent i -> do
-    resolveVar i
+    _ <- resolveVar i
     return (CTT.TransparentDecl (unAIdent i), [])
   DeclTransparentAll -> return (CTT.TransparentAllDecl, [])
   _ -> do let (f,typ,body,ns) = resolveNonMutualDecl d

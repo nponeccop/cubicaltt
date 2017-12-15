@@ -1,11 +1,9 @@
 {-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 module CTT where
 
-import Control.Applicative
 import Data.List
 import Data.Maybe
-import Data.Map (Map,(!),filterWithKey,elems)
-import qualified Data.Map as Map
+import Data.Map (elems)
 import Text.PrettyPrint as PP
 import Data.Set (Set)
 import qualified Data.Set as Set

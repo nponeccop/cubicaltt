@@ -2,9 +2,8 @@
 module Eval where
 
 import Data.List
-import Data.Maybe (fromMaybe)
 import Data.Map (Map,(!),mapWithKey,assocs,filterWithKey
-                ,elems,intersectionWith,intersection,keys
+                ,elems,intersectionWith,keys
                 ,member,notMember,empty)
 import qualified Data.Map as Map
 import qualified Data.Set as Set

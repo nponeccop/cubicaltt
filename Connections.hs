@@ -2,7 +2,6 @@
              GeneralizedNewtypeDeriving, TupleSections #-}
 module Connections where
 
-import Control.Applicative
 import Data.List
 import Data.Map (Map,(!),keys,fromList,toList,mapKeys,elems,intersectionWith
                 ,unionWith,singleton,foldrWithKey,assocs,mapWithKey
@@ -10,7 +9,6 @@ import Data.Map (Map,(!),keys,fromList,toList,mapKeys,elems,intersectionWith
 import Data.Set (Set,isProperSubsetOf)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Data.Maybe
 import Test.QuickCheck
 
 newtype Name = Name String
