@@ -72,16 +72,18 @@ flattenPTele (PTele exp typ : xs) = case appsToIdents exp of
 data SymKind = Variable | Constructor | PConstructor | Name
   deriving (Eq,Show)
 
+type Vars = Map.Map Ident (SymKind,Loc) -- Loc tracks definition location
+
 -- local environment for constructors
 data Env = Env { traceDeps :: Bool,
                  envModule :: String,
-                 variables :: [(Ident,(SymKind,Loc))] } -- Loc tracks definition location
+                 variables :: Vars } 
   deriving (Eq,Show)
 
 type Resolver a = ReaderT Env (ExceptT String Identity) a
 
 emptyEnv :: Bool -> Env
-emptyEnv doTraceDeps = Env doTraceDeps "foo" []
+emptyEnv doTraceDeps = Env doTraceDeps "foo" Map.empty
 
 runResolver :: Bool -> Resolver a -> Either String a
 runResolver traceDeps x = runIdentity $ runExceptT $ runReaderT x (emptyEnv traceDeps)
@@ -92,10 +94,11 @@ updateModule mod e = e{envModule = mod}
 insertIdent :: (Ident,(SymKind,(Int,Int))) -> Env -> Env
 insertIdent (n,(var,(l,c))) e
   | n == "_"  = e
-  | otherwise = e{variables = (n,(var,Loc (envModule e) (l,c))) : variables e}
+  | otherwise = e{variables = Map.insert n (var,Loc (envModule e) (l,c)) (variables e)}
 
-insertIdents :: [(Ident,(SymKind,(Int,Int)))] -> Env -> Env
-insertIdents = flip $ foldr insertIdent
+insertIdents :: Vars -> Env -> Env
+insertIdents vs e = 
+  e{variables = Map.union (Map.filterWithKey (\ident _ -> ident/="_") vs) (variables e)}
 
 insertName :: AIdent -> Env -> Env
 insertName (AIdent (loc,x)) = insertIdent (x,(Name,loc))
@@ -125,7 +128,7 @@ resolveName :: AIdent -> Resolver C.Name
 resolveName (AIdent (l,x)) = do
   modName <- asks envModule
   vars <- asks variables
-  case lookup x vars of
+  case Map.lookup x vars of
     Just (Name, _) -> return $ C.Name x
     _ -> throwError $ "Cannot resolve name " ++ x ++ " at position " ++
                       show l ++ " in module " ++ modName
@@ -139,7 +142,7 @@ resolveVar (AIdent (l,x)) = do
         case locPos defL of
           (_,1) | modName /= (locFile defL) -> trace (x++" @ "++modName++" -> "++x++" @ "++(locFile defL))
           _ -> id
-  case lookup x vars of
+  case Map.lookup x vars of
     Just (Variable, (Loc _ (-1,-1))) -> return $ CTT.Var x
     Just (Variable, defL) -> depLine defL $ return $ CTT.Var x
     Just (Constructor, defL) -> depLine defL $ return $ CTT.Con x []
@@ -280,7 +283,7 @@ resolveTele []        = return []
 resolveTele ((i,d):t) =
   ((i,) <$> resolveExp d) <:> local (insertVar i) (resolveTele t)
 
-resolveLabel :: [(Ident,(SymKind,(Int,Int)))] -> Label -> Resolver CTT.Label
+resolveLabel :: Vars -> Label -> Resolver CTT.Label
 resolveLabel _ (OLabel n vdecl) =
   CTT.OLabel (unAIdent n) <$> resolveTele (flattenTele vdecl)
 resolveLabel cs (PLabel n vdecl is sys) = do
@@ -288,24 +291,24 @@ resolveLabel cs (PLabel n vdecl is sys) = do
       ts    = map fst tele'
       names = map (C.Name . unAIdent) is
       n'    = unAIdent n
-      cs'   = delete (n',(PConstructor,(-1,-1))) cs -- TODO
+      cs'   = Map.filterWithKey (\ident (symkind,_) -> not (ident==n'&&symkind==PConstructor)) cs
   CTT.PLabel n' <$> resolveTele tele' <*> pure names
                 <*> local (insertNames is . insertIdents cs' . insertVars ts)
                       (resolveSystem sys)
 
 -- Resolve a non-mutual declaration; returns resolver for type and
 -- body separately
-resolveNonMutualDecl :: Decl -> (Ident,Resolver CTT.Ter
-                                ,Resolver CTT.Ter,[(Ident,(SymKind,(Int,Int)))])
-resolveNonMutualDecl d = case d of
+resolveNonMutualDecl :: String -> Decl -> (Ident,Resolver CTT.Ter
+                                          ,Resolver CTT.Ter,Vars)
+resolveNonMutualDecl modName d = case d of
   DeclDef (AIdent (l,f)) tele t body ->
     let tele' = flattenTele tele
         a     = binds CTT.Pi tele' (resolveExp t)
         d     = lams tele' (local (insertVar f) $ resolveWhere body)
-    in (f,a,d,[(f,(Variable,l))])
-  DeclData x tele sums  -> resolveDeclData x tele sums null
+    in (f,a,d,Map.singleton f (Variable,Loc modName l))
+  DeclData x tele sums  -> resolveDeclData modName x tele sums null
   DeclHData x tele sums ->
-    resolveDeclData x tele sums (const False) -- always pick HSum
+    resolveDeclData modName x tele sums (const False) -- always pick HSum
   DeclSplit (AIdent (l,f)) tele t brs ->
     let tele' = flattenTele tele
         vars  = map fst tele'
@@ -315,27 +318,27 @@ resolveNonMutualDecl d = case d of
                   ty  <- local (insertVars vars) $ resolveExp t
                   brs' <- local (insertVars (f:vars)) (mapM resolveBranch brs)
                   lams tele' (return $ CTT.Split f loc ty brs')
-    in (f,a,d,[(f,(Variable,l))])
+    in (f,a,d,Map.singleton f (Variable,Loc modName l))
   DeclUndef (AIdent (l,f)) tele t ->
     let tele' = flattenTele tele
         a     = binds CTT.Pi tele' (resolveExp t)
         d     = CTT.Undef <$> getLoc l <*> a
-    in (f,a,d,[(f,(Variable,l))])
+    in (f,a,d,Map.singleton f (Variable,Loc modName l))
 
 -- Helper function to resolve data declarations. The predicate p is
 -- used to decide if we should use Sum or HSum.
-resolveDeclData :: AIdent -> [Tele] -> [Label] -> ([(Ident,(SymKind,(Int,Int)))] -> Bool) ->
-                   (Ident, Resolver Ter, Resolver Ter, [(Ident, (SymKind, (Int,Int)))])
-resolveDeclData (AIdent (l,f)) tele sums p =
+resolveDeclData :: String -> AIdent -> [Tele] -> [Label] -> (Vars -> Bool) ->
+                   (Ident, Resolver Ter, Resolver Ter, Vars)
+resolveDeclData modName (AIdent (l,f)) tele sums p =
   let tele' = flattenTele tele
       a     = binds CTT.Pi tele' (return CTT.U)
-      cs    = [ (unAIdent lbl,(Constructor,l)) | OLabel lbl _ <- sums ]
-      pcs   = [ (unAIdent lbl,(PConstructor,l)) | PLabel lbl _ _ _ <- sums ]
+      cs    = Map.fromList [ (unAIdent lbl,(Constructor,Loc modName l)) | OLabel lbl _ <- sums ]
+      pcs   = Map.fromList [ (unAIdent lbl,(PConstructor,Loc modName l)) | PLabel lbl _ _ _ <- sums ]
       sum   = if p pcs then CTT.Sum else CTT.HSum
       d = lams tele' $ local (insertVar f) $
             sum <$> getLoc l <*> pure f
-                <*> mapM (resolveLabel (cs ++ pcs)) sums
-  in (f,a,d,(f,(Variable,l)):cs ++ pcs)
+                <*> mapM (resolveLabel (Map.union cs pcs)) sums
+  in (f,a,d,Map.union (Map.insert f (Variable,Loc modName l) cs) pcs)
 
 resolveRTele :: [Ident] -> [Resolver CTT.Ter] -> Resolver CTT.Tele
 resolveRTele [] _ = return []
@@ -361,47 +364,54 @@ findDeclLoc d = getLoc loc
             DeclTransparentAll              -> Nothing
 
 -- Resolve a declaration
-resolveDecl :: Decl -> Resolver (CTT.Decls,[(Ident,(SymKind,(Int,Int)))])
-resolveDecl d = case d of
-  DeclMutual decls -> do
-    let (fs,ts,bs,nss) = unzip4 $ map resolveNonMutualDecl decls
-        ns = concat nss -- TODO: some sanity checks? Duplicates!?
-    when (nub (map fst ns) /= concatMap (map fst) nss) $
-      throwError ("Duplicated constructor or ident: " ++ show nss)
-    as <- resolveRTele fs ts
-    -- The bodies know about all the names and constructors in the
-    -- mutual block
-    ds <- sequence $ map (local (insertIdents ns)) bs
-    let ads = zipWith (\ (x,y) z -> (x,(y,z))) as ds
-    l <- findDeclLoc d
-    return (CTT.MutualDecls l ads,ns)
-  DeclOpaque i  -> do
-    _ <- resolveVar i
-    return (CTT.OpaqueDecl (unAIdent i), [])
-  DeclTransparent i -> do
-    _ <- resolveVar i
-    return (CTT.TransparentDecl (unAIdent i), [])
-  DeclTransparentAll -> return (CTT.TransparentAllDecl, [])
-  _ -> do let (f,typ,body,ns) = resolveNonMutualDecl d
-          l <- findDeclLoc d
-          a <- typ
-          d <- body
-          return (CTT.MutualDecls l [(f,(a,d))],ns)
+resolveDecl :: Decl -> Resolver (CTT.Decls,Vars)
+resolveDecl d = do
+  modName <- asks envModule
+  case d of
+    DeclMutual decls -> do
+      let (fs,ts,bs,nss) = unzip4 $ map (resolveNonMutualDecl modName) decls
+          ns = Map.unions nss -- TODO: some sanity checks? Duplicates!?
+      when (Map.keys ns /= sort(concatMap (Map.keys) nss)) $
+        throwError ("Duplicated constructor or ident: " ++ show nss)
+      as <- resolveRTele fs ts
+      -- The bodies know about all the names and constructors in the
+      -- mutual block
+      ds <- sequence $ map (local (insertIdents ns)) bs
+      let ads = zipWith (\ (x,y) z -> (x,(y,z))) as ds
+      l <- findDeclLoc d
+      return (CTT.MutualDecls l ads,ns)
+    DeclOpaque i  -> do
+      _ <- resolveVar i
+      return (CTT.OpaqueDecl (unAIdent i), Map.empty)
+    DeclTransparent i -> do
+      _ <- resolveVar i
+      return (CTT.TransparentDecl (unAIdent i), Map.empty)
+    DeclTransparentAll -> return (CTT.TransparentAllDecl, Map.empty)
+    _ -> do let (f,typ,body,ns) = resolveNonMutualDecl modName d
+            l <- findDeclLoc d
+            a <- typ
+            d <- body
+            return (CTT.MutualDecls l [(f,(a,d))],ns)
 
-resolveDecls :: [Decl] -> Resolver ([CTT.Decls],[(Ident,(SymKind,(Int,Int)))])
-resolveDecls []     = return ([],[])
+resolveDecls :: [Decl] -> Resolver ([CTT.Decls],Vars)
+resolveDecls []     = return ([],Map.empty)
 resolveDecls (d:ds) = do
   (rtd,names)  <- resolveDecl d
   (rds,names') <- local (insertIdents names) $ resolveDecls ds
-  return (rtd : rds, names' ++ names)
+  return (rtd : rds, Map.union names' names)
 
-resolveModule :: Module -> Resolver ([CTT.Decls],[(Ident,(SymKind,(Int,Int)))])
+resolveModule :: Module -> Resolver ([CTT.Decls],Vars)
 resolveModule (Module (AIdent (_,n)) _ decls) =
   local (updateModule n) $ resolveDecls decls
 
-resolveModules :: [Module] -> Resolver ([CTT.Decls],[(Ident,(SymKind,(Int,Int)))])
-resolveModules []         = return ([],[])
-resolveModules (mod@(Module (AIdent (_,modname)) _ _):mods) = do
+resolveModules' :: [Module] -> Resolver ([[CTT.Decls]],Vars)
+resolveModules' []         = return ([],Map.empty)
+resolveModules' (mod@(Module (AIdent (_,modname)) _ _):mods) = do
   (rmod, names)  <- resolveModule mod
-  (rmods,names') <- local (updateModule modname) $ local (insertIdents names) $ resolveModules mods
-  return (rmod ++ rmods, names' ++ names)
+  (rmods,names') <- local (updateModule modname) $ local (insertIdents names) $ resolveModules' mods
+  return (rmod : rmods, Map.union names' names)
+
+resolveModules :: [Module] -> Resolver ([CTT.Decls],Vars)
+resolveModules ms = do
+  (rmods, names) <- resolveModules' ms
+  return (concat rmods, names)

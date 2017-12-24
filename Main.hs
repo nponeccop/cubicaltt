@@ -6,6 +6,7 @@ import Control.Monad.Reader
 import Data.Bifunctor
 import Data.IORef
 import Data.List
+import qualified Data.Map as Map
 import Data.Time
 import Data.Version (showVersion)
 import System.Directory
@@ -95,7 +96,7 @@ main = do
       | otherwise -> case files of
        []  -> do
          putStrLn welcome
-         runInputT (settings completionRef) (loop flags [] [] TC.verboseEnv completionRef)
+         runInputT (settings completionRef) (loop flags [] Map.empty TC.verboseEnv completionRef)
        [f] -> if Batch `elem` flags
          then compileBatch f
          else do
@@ -118,14 +119,14 @@ wrapExpressionParser exprStr = ExceptT $ return $ first OEParser $ case pExp (le
 
 wrapExpressionTypeChecker tenv body = ExceptT $ first OETypeCheckerExpr <$> TC.runInfer tenv body
 
-wrapTypeChecker :: [Decls] -> [(Ident, (SymKind, (Int,Int)))] -> ExceptT OurError IO TC.TEnv
+wrapTypeChecker :: [Decls] -> Vars -> ExceptT OurError IO TC.TEnv
 wrapTypeChecker adefs names = do
   (merr,tenv) <- liftIO $ TC.runDeclss TC.verboseEnv adefs
   ExceptT $ return $ case merr of
     Just err -> Left $ OETypeChecker err names tenv
     Nothing -> Right tenv
 
-compileFile :: [String] -> String -> IO (Either OurError (Bool, [(Ident, (SymKind,(Int,Int)))], TC.TEnv))
+compileFile :: [String] -> String -> IO (Either OurError (Bool, Vars, TC.TEnv))
 compileFile alreadyCheckedFileNames f = runExceptT $ do
   (_,_,mods) <- imports True ([],alreadyCheckedFileNames,[]) f
   -- Translate to TT
@@ -170,7 +171,7 @@ compileExpr names tenv flags str' = runExceptT $ let
 
 data OurError
   = OEResolver String
-  | OETypeChecker String [(CTT.Ident,(SymKind,(Int,Int)))] TC.TEnv
+  | OETypeChecker String Vars TC.TEnv
   | OEImports String
   | OEParser String
   | OETypeCheckerExpr String
@@ -188,27 +189,27 @@ handleExprErrors = \case
 handleCommonErrors = \case
     OEResolver err -> do
       putStrLn $ "Resolver failed: " ++ err
-      return ([], TC.verboseEnv)
+      return (Map.empty, TC.verboseEnv)
     OETypeChecker err names tenv -> do
       putStrLn $ "Type checking failed: " ++ shrink err
       return (names, tenv)
     OEImports err -> do
       putStrLn err
-      return ([], TC.verboseEnv)
+      return (Map.empty, TC.verboseEnv)
     OETypeCheckerExpr err -> do
       putStrLn $ "Type checking failed: " ++ shrink err
-      return ([], TC.verboseEnv)
+      return (Map.empty, TC.verboseEnv)
     OEParser err -> do
       putStrLn ("Parse error: " ++ err)
-      return ([], TC.verboseEnv)
+      return (Map.empty, TC.verboseEnv)
 
 resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags || Deps `elem` flags) $ do
   -- Compute names for auto completion
-  liftIO $ writeIORef completionRef $ map fst names
+  liftIO $ writeIORef completionRef $ Map.keys names
   loop flags f names tenv completionRef
 
 warnDups names = do
-  let ns = map fst names
+  let ns = Map.keys names
       uns = nub ns
       dups = ns \\ uns
   liftIO $ unless (null dups) $
@@ -221,7 +222,7 @@ initLoop flags f completionRef
   = liftIO (compileFile [] f >>= handleFileErrors) >>= resumeLoop flags f completionRef
 
 -- The main loop
-loop :: [Flag] -> FilePath -> [(CTT.Ident,(SymKind,(Int,Int)))] -> TC.TEnv -> IORef [String] -> Interpreter ()
+loop :: [Flag] -> FilePath -> Vars -> TC.TEnv -> IORef [String] -> Interpreter ()
 loop flags f names tenv completionRef = go where
   go :: Interpreter ()
   go = do
