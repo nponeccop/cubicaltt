@@ -13,6 +13,7 @@ import System.FilePath
 import System.Environment
 import System.Console.GetOpt
 import System.Console.Haskeline
+import System.Exit
 import Text.Printf
 
 import Exp.Lex
@@ -67,6 +68,15 @@ settings n = Settings
   , complete       = completeWord Nothing " \t" $ ourCompletion n
   , autoAddHistory = True }
 
+compileBatch :: String -> IO ()
+compileBatch f = do
+  result <- compileFile [] f
+  case result of
+    Right _ -> exitSuccess
+    Left _ -> do
+      void $ handleFileErrors result
+      exitFailure
+
 ourCompletion :: IORef [String] -> String -> IO [Completion]
 ourCompletion n x = do
   ns <- readIORef n
@@ -84,10 +94,12 @@ main = do
        []  -> do
          putStrLn welcome
          runInputT (settings completionRef) (loop flags [] [] TC.verboseEnv completionRef)
-       [f] -> do
-         putStrLn welcome
-         putStrLn $ "Loading " ++ show f
-         runInputT (settings completionRef) $ initLoop flags f completionRef
+       [f] -> if Batch `elem` flags
+         then compileBatch f
+         else do
+           putStrLn welcome
+           putStrLn $ "Loading " ++ show f
+           runInputT (settings completionRef) $ initLoop flags f completionRef
        _   -> putStrLn $ "Input error: zero or one file expected\n\n" ++
                          usageInfo usage options
     (_,_,errs) -> putStrLn $ "Input error: " ++ concat errs ++ "\n" ++
