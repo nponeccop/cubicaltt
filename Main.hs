@@ -33,15 +33,17 @@ import qualified Eval as E
 type Interpreter a = InputT IO a
 
 -- Flag handling
-data Flag = Debug | Batch | Help | Version | Time
+data Flag = Debug | Batch | Help | Version | Time | Deps
   deriving (Eq,Show)
 
 options :: [OptDescr Flag]
-options = [ Option "d"  ["debug"]   (NoArg Debug)   "run in debugging mode"
-          , Option "b"  ["batch"]   (NoArg Batch)   "run in batch mode"
-          , Option ""   ["help"]    (NoArg Help)    "print help"
-          , Option "-t" ["time"]    (NoArg Time)    "measure time spent computing"
-          , Option ""   ["version"] (NoArg Version) "print version number" ]
+options = [ Option "d"  ["debug"]      (NoArg Debug)   "run in debugging mode"
+          , Option "b"  ["batch"]      (NoArg Batch)   "run in batch mode"
+          , Option ""   ["help"]       (NoArg Help)    "print help"
+          , Option "-t" ["time"]       (NoArg Time)    "measure time spent computing"
+          , Option ""   ["version"]    (NoArg Version) "print version number" 
+          , Option "g"  ["graph-deps"] (NoArg Deps)    "print dependency graph"
+          ]
 
 -- Version number, welcome message, usage and prompt strings
 welcome, usage, prompt :: String
@@ -108,7 +110,7 @@ main = do
 shrink :: String -> String
 shrink s = s -- if length s > 1000 then take 1000 s ++ "..." else s
 
-wrapResolver x = ExceptT $ return $ first OEResolver $ runResolver x
+wrapResolver deps x = ExceptT $ return $ first OEResolver $ runResolver deps x
 
 wrapExpressionParser exprStr = ExceptT $ return $ first OEParser $ case pExp (lexer exprStr) of
   Bad err -> Left err
@@ -116,18 +118,18 @@ wrapExpressionParser exprStr = ExceptT $ return $ first OEParser $ case pExp (le
 
 wrapExpressionTypeChecker tenv body = ExceptT $ first OETypeCheckerExpr <$> TC.runInfer tenv body
 
-wrapTypeChecker :: [Decls] -> [(Ident, SymKind)] -> ExceptT OurError IO TC.TEnv
+wrapTypeChecker :: [Decls] -> [(Ident, (SymKind, (Int,Int)))] -> ExceptT OurError IO TC.TEnv
 wrapTypeChecker adefs names = do
   (merr,tenv) <- liftIO $ TC.runDeclss TC.verboseEnv adefs
   ExceptT $ return $ case merr of
     Just err -> Left $ OETypeChecker err names tenv
     Nothing -> Right tenv
 
-compileFile :: [String] -> String -> IO (Either OurError (Bool, [(Ident, SymKind)], TC.TEnv))
+compileFile :: [String] -> String -> IO (Either OurError (Bool, [(Ident, (SymKind,(Int,Int)))], TC.TEnv))
 compileFile alreadyCheckedFileNames f = runExceptT $ do
   (_,_,mods) <- imports True ([],alreadyCheckedFileNames,[]) f
   -- Translate to TT
-  (adefs, names) <- wrapResolver $ resolveModules mods
+  (adefs, names) <- wrapResolver True $ resolveModules mods
   -- After resolivng the file check if some definitions were shadowed:
   warnDups names
   tenv <- wrapTypeChecker adefs names
@@ -156,7 +158,7 @@ compileExpr names tenv flags str' = runExceptT $ let
       str -> ("EVAL: ",str,id)
   in do
   exp <- wrapExpressionParser str
-  body <- wrapResolver $ local (insertIdents names) $ resolveExp exp
+  body <- wrapResolver False $ local (insertIdents names) $ resolveExp exp
   _ <-  wrapExpressionTypeChecker tenv body
   liftIO $ measureTime (Time `elem` flags) $ do
     let e = mod $ E.eval (TC.env tenv) body
@@ -168,7 +170,7 @@ compileExpr names tenv flags str' = runExceptT $ let
 
 data OurError
   = OEResolver String
-  | OETypeChecker String [(CTT.Ident,SymKind)] TC.TEnv
+  | OETypeChecker String [(CTT.Ident,(SymKind,(Int,Int)))] TC.TEnv
   | OEImports String
   | OEParser String
   | OETypeCheckerExpr String
@@ -200,7 +202,7 @@ handleCommonErrors = \case
       putStrLn ("Parse error: " ++ err)
       return ([], TC.verboseEnv)
 
-resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags) $ do
+resumeLoop flags f completionRef (names, tenv) = unless (Batch `elem` flags || Deps `elem` flags) $ do
   -- Compute names for auto completion
   liftIO $ writeIORef completionRef $ map fst names
   loop flags f names tenv completionRef
@@ -219,7 +221,7 @@ initLoop flags f completionRef
   = liftIO (compileFile [] f >>= handleFileErrors) >>= resumeLoop flags f completionRef
 
 -- The main loop
-loop :: [Flag] -> FilePath -> [(CTT.Ident,SymKind)] -> TC.TEnv -> IORef [String] -> Interpreter ()
+loop :: [Flag] -> FilePath -> [(CTT.Ident,(SymKind,(Int,Int)))] -> TC.TEnv -> IORef [String] -> Interpreter ()
 loop flags f names tenv completionRef = go where
   go :: Interpreter ()
   go = do

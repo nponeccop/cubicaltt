@@ -16,6 +16,7 @@ import CTT (Ter,Ident,Loc(..),mkApps,mkWheres)
 import qualified CTT
 import Connections (negFormula,andFormula,orFormula)
 import qualified Connections as C
+import Debug.Trace
 
 -- | Useful auxiliary functions
 
@@ -72,43 +73,44 @@ data SymKind = Variable | Constructor | PConstructor | Name
   deriving (Eq,Show)
 
 -- local environment for constructors
-data Env = Env { envModule :: String,
-                 variables :: [(Ident,SymKind)] }
+data Env = Env { traceDeps :: Bool,
+                 envModule :: String,
+                 variables :: [(Ident,(SymKind,Loc))] } -- Loc tracks definition location
   deriving (Eq,Show)
 
 type Resolver a = ReaderT Env (ExceptT String Identity) a
 
-emptyEnv :: Env
-emptyEnv = Env "" []
+emptyEnv :: Bool -> Env
+emptyEnv doTraceDeps = Env doTraceDeps "foo" []
 
-runResolver :: Resolver a -> Either String a
-runResolver x = runIdentity $ runExceptT $ runReaderT x emptyEnv
+runResolver :: Bool -> Resolver a -> Either String a
+runResolver traceDeps x = runIdentity $ runExceptT $ runReaderT x (emptyEnv traceDeps)
 
 updateModule :: String -> Env -> Env
 updateModule mod e = e{envModule = mod}
 
-insertIdent :: (Ident,SymKind) -> Env -> Env
-insertIdent (n,var) e
+insertIdent :: (Ident,(SymKind,(Int,Int))) -> Env -> Env
+insertIdent (n,(var,(l,c))) e
   | n == "_"  = e
-  | otherwise = e{variables = (n,var) : variables e}
+  | otherwise = e{variables = (n,(var,Loc (envModule e) (l,c))) : variables e}
 
-insertIdents :: [(Ident,SymKind)] -> Env -> Env
+insertIdents :: [(Ident,(SymKind,(Int,Int)))] -> Env -> Env
 insertIdents = flip $ foldr insertIdent
 
 insertName :: AIdent -> Env -> Env
-insertName (AIdent (_,x)) = insertIdent (x,Name)
+insertName (AIdent (loc,x)) = insertIdent (x,(Name,loc))
 
 insertNames :: [AIdent] -> Env -> Env
 insertNames = flip $ foldr insertName
 
 insertVar :: Ident -> Env -> Env
-insertVar x = insertIdent (x,Variable)
+insertVar x= insertIdent (x,(Variable,(-1,-1)))
 
 insertVars :: [Ident] -> Env -> Env
 insertVars = flip $ foldr insertVar
 
 insertAIdent :: AIdent -> Env -> Env
-insertAIdent (AIdent (_,x)) = insertIdent (x,Variable)
+insertAIdent (AIdent (loc,x)) = insertIdent (x,(Variable,loc))
 
 insertAIdents :: [AIdent] -> Env -> Env
 insertAIdents  = flip $ foldr insertAIdent
@@ -124,7 +126,7 @@ resolveName (AIdent (l,x)) = do
   modName <- asks envModule
   vars <- asks variables
   case lookup x vars of
-    Just Name -> return $ C.Name x
+    Just (Name, _) -> return $ C.Name x
     _ -> throwError $ "Cannot resolve name " ++ x ++ " at position " ++
                       show l ++ " in module " ++ modName
 
@@ -132,16 +134,23 @@ resolveVar :: AIdent -> Resolver Ter
 resolveVar (AIdent (l,x)) = do
   modName <- asks envModule
   vars    <- asks variables
+  -- let depLine defL = x++"@"++modName++(show l)++ "->"++x++"@"++(locFile defL) ++ show (locPos defL)
+  let depLine defL = 
+        case locPos defL of
+          (_,1) | modName /= (locFile defL) -> trace (modName++"->"++x++"@"++(locFile defL))
+          _ -> id
   case lookup x vars of
-    Just Variable    -> return $ CTT.Var x
-    Just Constructor -> return $ CTT.Con x []
-    Just PConstructor ->
+    Just (Variable, (Loc _ (-1,-1))) -> return $ CTT.Var x
+    Just (Variable, defL) -> depLine defL $ return $ CTT.Var x
+    Just (Constructor, defL) -> depLine defL $ return $ CTT.Con x []
+    Just (PConstructor, _) ->
       throwError $ "The path constructor " ++ x ++ " is used as a" ++
                    " variable at " ++ show l ++ " in " ++ modName ++
                    " (path constructors should have their type in" ++
                    " curly braces as first argument)"
-    Just Name        ->
-      throwError $ "Name " ++ x ++ " used as a variable at position " ++
+    Just (Name, defL)        ->
+      throwError $ "Name " ++ x ++ " defined at position " ++ show defL ++ 
+                   " is used as a variable at position " ++
                    show l ++ " in module " ++ modName
     _ -> throwError $ "Cannot resolve variable " ++ x ++ " at position " ++
                       show l ++ " in module " ++ modName
@@ -271,7 +280,7 @@ resolveTele []        = return []
 resolveTele ((i,d):t) =
   ((i,) <$> resolveExp d) <:> local (insertVar i) (resolveTele t)
 
-resolveLabel :: [(Ident,SymKind)] -> Label -> Resolver CTT.Label
+resolveLabel :: [(Ident,(SymKind,(Int,Int)))] -> Label -> Resolver CTT.Label
 resolveLabel _ (OLabel n vdecl) =
   CTT.OLabel (unAIdent n) <$> resolveTele (flattenTele vdecl)
 resolveLabel cs (PLabel n vdecl is sys) = do
@@ -279,7 +288,7 @@ resolveLabel cs (PLabel n vdecl is sys) = do
       ts    = map fst tele'
       names = map (C.Name . unAIdent) is
       n'    = unAIdent n
-      cs'   = delete (n',PConstructor) cs
+      cs'   = delete (n',(PConstructor,(-1,-1))) cs -- TODO
   CTT.PLabel n' <$> resolveTele tele' <*> pure names
                 <*> local (insertNames is . insertIdents cs' . insertVars ts)
                       (resolveSystem sys)
@@ -287,13 +296,13 @@ resolveLabel cs (PLabel n vdecl is sys) = do
 -- Resolve a non-mutual declaration; returns resolver for type and
 -- body separately
 resolveNonMutualDecl :: Decl -> (Ident,Resolver CTT.Ter
-                                ,Resolver CTT.Ter,[(Ident,SymKind)])
+                                ,Resolver CTT.Ter,[(Ident,(SymKind,(Int,Int)))])
 resolveNonMutualDecl d = case d of
-  DeclDef (AIdent (_,f)) tele t body ->
+  DeclDef (AIdent (l,f)) tele t body ->
     let tele' = flattenTele tele
         a     = binds CTT.Pi tele' (resolveExp t)
         d     = lams tele' (local (insertVar f) $ resolveWhere body)
-    in (f,a,d,[(f,Variable)])
+    in (f,a,d,[(f,(Variable,l))])
   DeclData x tele sums  -> resolveDeclData x tele sums null
   DeclHData x tele sums ->
     resolveDeclData x tele sums (const False) -- always pick HSum
@@ -306,27 +315,27 @@ resolveNonMutualDecl d = case d of
                   ty  <- local (insertVars vars) $ resolveExp t
                   brs' <- local (insertVars (f:vars)) (mapM resolveBranch brs)
                   lams tele' (return $ CTT.Split f loc ty brs')
-    in (f,a,d,[(f,Variable)])
+    in (f,a,d,[(f,(Variable,l))])
   DeclUndef (AIdent (l,f)) tele t ->
     let tele' = flattenTele tele
         a     = binds CTT.Pi tele' (resolveExp t)
         d     = CTT.Undef <$> getLoc l <*> a
-    in (f,a,d,[(f,Variable)])
+    in (f,a,d,[(f,(Variable,l))])
 
 -- Helper function to resolve data declarations. The predicate p is
 -- used to decide if we should use Sum or HSum.
-resolveDeclData :: AIdent -> [Tele] -> [Label] -> ([(Ident,SymKind)] -> Bool) ->
-                   (Ident, Resolver Ter, Resolver Ter, [(Ident, SymKind)])
+resolveDeclData :: AIdent -> [Tele] -> [Label] -> ([(Ident,(SymKind,(Int,Int)))] -> Bool) ->
+                   (Ident, Resolver Ter, Resolver Ter, [(Ident, (SymKind, (Int,Int)))])
 resolveDeclData (AIdent (l,f)) tele sums p =
   let tele' = flattenTele tele
       a     = binds CTT.Pi tele' (return CTT.U)
-      cs    = [ (unAIdent lbl,Constructor) | OLabel lbl _ <- sums ]
-      pcs   = [ (unAIdent lbl,PConstructor) | PLabel lbl _ _ _ <- sums ]
+      cs    = [ (unAIdent lbl,(Constructor,l)) | OLabel lbl _ <- sums ]
+      pcs   = [ (unAIdent lbl,(PConstructor,l)) | PLabel lbl _ _ _ <- sums ]
       sum   = if p pcs then CTT.Sum else CTT.HSum
       d = lams tele' $ local (insertVar f) $
             sum <$> getLoc l <*> pure f
                 <*> mapM (resolveLabel (cs ++ pcs)) sums
-  in (f,a,d,(f,Variable):cs ++ pcs)
+  in (f,a,d,(f,(Variable,l)):cs ++ pcs)
 
 resolveRTele :: [Ident] -> [Resolver CTT.Ter] -> Resolver CTT.Tele
 resolveRTele [] _ = return []
@@ -352,7 +361,7 @@ findDeclLoc d = getLoc loc
             DeclTransparentAll              -> Nothing
 
 -- Resolve a declaration
-resolveDecl :: Decl -> Resolver (CTT.Decls,[(Ident,SymKind)])
+resolveDecl :: Decl -> Resolver (CTT.Decls,[(Ident,(SymKind,(Int,Int)))])
 resolveDecl d = case d of
   DeclMutual decls -> do
     let (fs,ts,bs,nss) = unzip4 $ map resolveNonMutualDecl decls
@@ -379,20 +388,20 @@ resolveDecl d = case d of
           d <- body
           return (CTT.MutualDecls l [(f,(a,d))],ns)
 
-resolveDecls :: [Decl] -> Resolver ([CTT.Decls],[(Ident,SymKind)])
+resolveDecls :: [Decl] -> Resolver ([CTT.Decls],[(Ident,(SymKind,(Int,Int)))])
 resolveDecls []     = return ([],[])
 resolveDecls (d:ds) = do
   (rtd,names)  <- resolveDecl d
   (rds,names') <- local (insertIdents names) $ resolveDecls ds
   return (rtd : rds, names' ++ names)
 
-resolveModule :: Module -> Resolver ([CTT.Decls],[(Ident,SymKind)])
+resolveModule :: Module -> Resolver ([CTT.Decls],[(Ident,(SymKind,(Int,Int)))])
 resolveModule (Module (AIdent (_,n)) _ decls) =
   local (updateModule n) $ resolveDecls decls
 
-resolveModules :: [Module] -> Resolver ([CTT.Decls],[(Ident,SymKind)])
+resolveModules :: [Module] -> Resolver ([CTT.Decls],[(Ident,(SymKind,(Int,Int)))])
 resolveModules []         = return ([],[])
-resolveModules (mod:mods) = do
+resolveModules (mod@(Module (AIdent (_,modname)) _ _):mods) = do
   (rmod, names)  <- resolveModule mod
-  (rmods,names') <- local (insertIdents names) $ resolveModules mods
+  (rmods,names') <- local (updateModule modname) $ local (insertIdents names) $ resolveModules mods
   return (rmod ++ rmods, names' ++ names)
