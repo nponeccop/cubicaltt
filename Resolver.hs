@@ -137,7 +137,7 @@ resolveVar (AIdent (l,x)) = do
   -- let depLine defL = x++"@"++modName++(show l)++ "->"++x++"@"++(locFile defL) ++ show (locPos defL)
   let depLine defL = 
         case locPos defL of
-          (_,1) | modName /= (locFile defL) -> trace (modName++"->"++x++"@"++(locFile defL))
+          (_,1) | modName /= (locFile defL) -> trace (x++" @ "++modName++" -> "++x++" @ "++(locFile defL))
           _ -> id
   case lookup x vars of
     Just (Variable, (Loc _ (-1,-1))) -> return $ CTT.Var x
