@@ -71,9 +71,9 @@ settings n = Settings
   , complete       = completeWord Nothing " \t" $ ourCompletion n
   , autoAddHistory = True }
 
-compileBatch :: String -> IO ()
-compileBatch f = do
-  result <- compileFile [] f
+compileBatch :: [Flag] -> String -> IO ()
+compileBatch flags f = do
+  result <- compileFile flags[] f
   case result of
     Right _ -> exitSuccess
     Left _ -> do
@@ -98,7 +98,7 @@ main = do
          putStrLn welcome
          runInputT (settings completionRef) (loop flags [] Map.empty TC.verboseEnv completionRef)
        [f] -> if Batch `elem` flags
-         then compileBatch f
+         then compileBatch flags f
          else do
            putStrLn welcome
            putStrLn $ "Loading " ++ show f
@@ -126,11 +126,11 @@ wrapTypeChecker adefs names = do
     Just err -> Left $ OETypeChecker err names tenv
     Nothing -> Right tenv
 
-compileFile :: [String] -> String -> IO (Either OurError (Bool, Vars, TC.TEnv))
-compileFile alreadyCheckedFileNames f = runExceptT $ do
-  (_,_,mods) <- imports True ([],alreadyCheckedFileNames,[]) f
+compileFile :: [Flag] -> [String] -> String -> IO (Either OurError (Bool, Vars, TC.TEnv))
+compileFile flags alreadyCheckedFileNames f = runExceptT $ do
+  (_,_,mods) <- imports flags True ([],alreadyCheckedFileNames,[]) f
   -- Translate to TT
-  (adefs, names) <- wrapResolver True $ resolveModules mods
+  (adefs, names) <- wrapResolver (Deps `elem` flags) $ resolveModules mods
   -- After resolivng the file check if some definitions were shadowed:
   warnDups names
   tenv <- wrapTypeChecker adefs names
@@ -219,7 +219,7 @@ warnDups names = do
 -- Initialize the main loop
 initLoop :: [Flag] -> FilePath -> IORef [String] -> Interpreter ()
 initLoop flags f completionRef
-  = liftIO (compileFile [] f >>= handleFileErrors) >>= resumeLoop flags f completionRef
+  = liftIO (compileFile flags [] f >>= handleFileErrors) >>= resumeLoop flags f completionRef
 
 -- The main loop
 loop :: [Flag] -> FilePath -> Vars -> TC.TEnv -> IORef [String] -> Interpreter ()
@@ -244,9 +244,9 @@ loop flags f names tenv completionRef = go where
 -- (not ok,loaded,already loaded defs) -> to load ->
 --   (new not ok, new loaded, new defs)
 -- the bool determines if it should be verbose or not
-imports :: Bool -> ([String],[String],[Module]) -> String ->
+imports :: [Flag] -> Bool -> ([String],[String],[Module]) -> String ->
            ExceptT OurError IO ([String],[String],[Module])
-imports v st@(notok,loaded,mods) f
+imports flags v st@(notok,loaded,mods) f
   | f `elem` notok  = throwError $ OEImports ("Looping imports in " ++ f)
   | f `elem` loaded = return st
   | otherwise       = do
@@ -261,9 +261,9 @@ imports v st@(notok,loaded,mods) f
         let imp_ctt = [prefix ++ i ++ ".ctt" | Import (AIdent (_,i)) <- imp]
         when (name /= dropExtension (takeFileName f)) $
           throwError $ OEImports $ "Module name mismatch in " ++ show f ++ " with wrong name " ++ name
-        void $ ExceptT $ compileFile (f:loaded) f
+        void $ ExceptT $ compileFile flags (f:loaded) f
         (notok1,loaded1,mods1) <-
-          foldM (imports v) (f:notok,loaded,mods) imp_ctt
+          foldM (imports flags v) (f:notok,loaded,mods) imp_ctt
         liftIO $ when v $ putStrLn $ "Parsed " ++ show f ++ " successfully!"
         return (notok,f:loaded1,mods1 ++ [mod])
 

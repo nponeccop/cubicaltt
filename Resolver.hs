@@ -137,10 +137,11 @@ resolveVar :: AIdent -> Resolver Ter
 resolveVar (AIdent (l,x)) = do
   modName <- asks envModule
   vars    <- asks variables
+  doDeps  <- asks traceDeps
   -- let depLine defL = x++"@"++modName++(show l)++ "->"++x++"@"++(locFile defL) ++ show (locPos defL)
   let depLine defL = 
         case locPos defL of
-          (_,1) | modName /= (locFile defL) -> trace (x++" @ "++modName++" -> "++x++" @ "++(locFile defL))
+          (_,1) | doDeps && modName /= (locFile defL) -> trace (x++" @ "++modName++" -> "++x++" @ "++(locFile defL))
           _ -> id
   case Map.lookup x vars of
     Just (Variable, (Loc _ (-1,-1))) -> return $ CTT.Var x
